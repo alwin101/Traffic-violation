@@ -1,0 +1,99 @@
+import cv2
+import numpy as np
+import pytesseract
+
+# Configure pytesseract to use the installed tesseract executable
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Update this path
+
+# Load YOLO
+net = cv2.dnn.readNet('yolov4.weights', 'yolov4.cfg')
+layer_names = net.getLayerNames()
+output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
+classes = []
+if isinstance(net.getUnconnectedOutLayers(), np.ndarray):
+    output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers().flatten()]
+else:
+    output_layers = [layer_names[i[0] - 1] for i in net.getUnconnectedOutLayers()]
+classes = []
+
+# Function to draw bounding boxes
+def draw_bounding_boxes(img, class_id, confidence, x, y, x_plus_w, y_plus_h):
+    label = str(classes[class_id])
+    color = (0, 255, 0)
+    cv2.rectangle(img, (x, y), (x_plus_w, y_plus_h), color, 2)
+    cv2.putText(img, label, (x - 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+# Function to check if the vehicle crossed the line
+def is_crossing_line(line_y, box_y, box_h):
+    return box_y < line_y < box_y + box_h
+
+# Function to detect number plate and extract text
+def detect_number_plate(img, x, y, w, h):
+    plate_img = img[y:y+h, x:x+w]
+    plate_img = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+    plate_img = cv2.threshold(plate_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    number_plate_text = pytesseract.image_to_string(plate_img, config='--psm 8')
+    return number_plate_text.strip()
+
+# Initialize video capture
+cap = cv2.VideoCapture('traffic_video.mp4')
+
+# Define the virtual line
+line_position = 500  # Adjust this value to move the line lower
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    height, width, channels = frame.shape
+
+    # Detecting objects
+    blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+    net.setInput(blob)
+    outs = net.forward(output_layers)
+
+    class_ids = []
+    confidences = []
+    boxes = []
+
+    for out in outs:
+        for detection in out:
+            scores = detection[5:]
+            class_id = np.argmax(scores)
+            confidence = scores[class_id]
+            if confidence > 0.5:
+                center_x = int(detection[0] * width)
+                center_y = int(detection[1] * height)
+                w = int(detection[2] * width)
+                h = int(detection[3] * height)
+                x = int(center_x - w / 2)
+                y = int(center_y - h / 2)
+                boxes.append([x, y, w, h])
+                confidences.append(float(confidence))
+                class_ids.append(class_id)
+
+    indices = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+
+    # Draw the virtual line
+    cv2.line(frame, (0, line_position), (width, line_position), (0, 0, 255), 2)
+
+    # Draw bounding boxes and check for line crossing
+    for i in range(len(boxes)):
+        if i in indices:
+            x, y, w, h = boxes[i]
+            draw_bounding_boxes(frame, class_ids[i], confidences[i], x, y, x + w, y + h)
+            if class_ids[i] == 2:  # Assuming class_id 2 corresponds to cars, adjust if necessary
+                number_plate_text = detect_number_plate(frame, x, y, w, h)
+                if number_plate_text:
+                    cv2.putText(frame, number_plate_text, (x, y - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            if is_crossing_line(line_position, y, h):
+                cv2.putText(frame, "Crossing Line", (x, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+    cv2.imshow('Traffic Monitoring', frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
